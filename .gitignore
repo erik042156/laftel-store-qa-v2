@@ -1,0 +1,38 @@
+# 환경변수 / 민감정보
+.env
+.env.*
+!.env.example
+
+# Google 서비스 계정 키 등 인증 파일
+*service-account*.json
+*-key.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 자동화 테스트 산출물 (git 미추적, AUTOMATION_GUIDE 3·14절)
+automation/screenshots/
+automation/reports/
+
+# OS
+.DS_Store
+
+# Shrimp Task Manager 내부 데이터(자체 git 저장소를 별도로 관리하는 도구 런타임 상태)
+/shrimp_data/
+
+# Playwright MCP 도구 캐시/스크린샷
+/.playwright-mcp/
+
+# Claude Code 로컬 전용 설정/세션 락 파일
+/.claude/settings.local.json
+/.claude/scheduled_tasks.lock
+
+# MCP 서버 설정(로컬 머신의 절대경로를 포함하므로 저장소에 포함하지 않음)
+/.mcp.json
+
+# 이전 Git 이력 백업(로컬 보관용)
+/.git-backup-v1/
