@@ -108,7 +108,7 @@ Candidate 문서(`docs/tc/automation-candidates/{feature-slug}.md`)의 `상태`�
 - 이 명령은 `O`/`X`가 아닌 값(빈 값 포함)이 있거나 `O`가 0건이면 원인을 출력하고 중단합니다.
   이 경우 평가를 진행하지 않고 사용자가 O/X 입력을 마쳐야 한다는 점과 해당 행을 그대로
   안내한 뒤 종료합니다. 값을 대신 채우거나 해석하지 않습니다.
-- 조회된 TC를 Feature(TC ID의 Feature 카테고리 또는 Feature 컬럼)별로 나눠, 각 Feature의
+- 조회된 TC를 Feature(TC ID의 Feature 카테고리 또는 1 Depth 컬럼)별로 나눠, 각 Feature의
   `docs/tc/{feature-slug}.md`가 `상태: 승인완료`이고 해당 TC ID가 그 문서에 존재하는지 확인합니다.
   아니면 평가하지 않고 사유를 안내한 뒤 종료합니다. 사용자가 특정 Feature만 평가하길 원하면 그
   Feature의 TC만 대상으로 삼습니다.

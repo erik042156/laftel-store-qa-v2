@@ -2,12 +2,13 @@
 """
 Google Spreadsheet 동기화 CLI.
 
-tc-writing Skill(.claude/skills/tc-writing/SKILL.md)의 9개 컬럼 정의를 따르는
+tc-writing Skill(.claude/skills/tc-writing/SKILL.md)의 10개 컬럼 정의를 따르는
 Markdown TC 문서(docs/tc/{feature-slug}.md)를 읽어 Google Spreadsheet에 반영한다.
 
 지원 명령:
   list                        : 현재 Spreadsheet에 저장된 TC 목록을 조회한다.
   append                      : Markdown TC 문서의 TC를 Spreadsheet에 추가한다(append-only, 수정/삭제 없음).
+  pull                        : 시트의 TC를 읽어 Markdown TC 문서에 반영한다(시트→md, 시트는 수정하지 않음).
   candidate-create-worksheet  : 자동화 후보 평가용 워크시트를 생성한다(이미 있으면 오류).
   candidate-sync              : Candidate 문서(docs/tc/automation-candidates/{slug}.md)의
                                  AI 작성 영역만 Spreadsheet에 반영한다(신규 TC는 새 행 추가,
@@ -32,20 +33,21 @@ import sys
 
 TC_COLUMNS = [
     "ID",
-    "Requirement ID",
-    "Feature",
-    "Test Scenario",
+    "1 Depth",
+    "2 Depth",
+    "3 Depth",
     "Preconditions",
     "Test Steps",
     "Expected Result",
     "Priority",
+    "Requirement ID",
     "Result",
 ]
 
 DEFAULT_WORKSHEET_NAME = "TC"
 
-# Spreadsheet의 전체 TC 워크시트는 TC 컬럼 9개 뒤에 사용자 입력 전용 "Regression 여부" 열을 갖는다.
-# Markdown TC 문서의 표는 9개 컬럼(TC_COLUMNS)만 사용하며, 이 열은 Sheet에서만 존재한다.
+# Spreadsheet의 전체 TC 워크시트는 TC 컬럼 10개 뒤에 사용자 입력 전용 "Regression 여부" 열을 갖는다.
+# Markdown TC 문서의 표는 10개 컬럼(TC_COLUMNS)만 사용하며, 이 열은 Sheet에서만 존재한다.
 # AI는 이 열에 값을 쓰지 않는다(사용자가 O/X를 직접 입력, "O"만 Regression TC로 사용).
 REGRESSION_COLUMN = "Regression 여부"
 SHEET_TC_COLUMNS = TC_COLUMNS + [REGRESSION_COLUMN]
@@ -54,7 +56,7 @@ DEFAULT_REGRESSION_WORKSHEET_NAME = "Regression TC"
 
 # Feature Risk Matrix는 TC용 스프레드시트와 별도 파일이며(GOOGLE_RISK_SHEET_ID), 읽기 전용으로만 조회한다.
 # 시트 상단에 제목 행이 있어 실제 헤더는 5행이다.
-DEFAULT_RISK_WORKSHEET_NAME = "4.리스크매트릭스"
+DEFAULT_RISK_WORKSHEET_NAME = "리스크 매트릭스"
 DEFAULT_RISK_HEADER_ROW = 5
 
 # automation-candidate-agent.md 산출물 템플릿의 "AI 평가 결과" 표 헤더와 정확히 일치해야 한다.
@@ -177,11 +179,11 @@ def is_separator_row(cells):
     )
 
 
-def parse_markdown_tables(markdown_text, expected_header):
-    """Markdown 문서에서 expected_header와 정확히 일치하는 헤더를 가진 표를 모두 찾아
-    데이터 행을 합쳐 반환한다(문서 안에 같은 형식의 표가 여러 개 있어도 모두 수집)."""
-    lines = markdown_text.splitlines()
-    rows = []
+def find_table_rows(lines, expected_header):
+    """줄 리스트에서 expected_header와 정확히 일치하는 헤더를 가진 표를 모두 찾아
+    (표 번호, 줄 인덱스, 셀 리스트) 목록을 반환한다. 줄 인덱스는 lines 기준 0-based다."""
+    found = []
+    table_no = 0
     i = 0
     n = len(lines)
     while i < n:
@@ -197,16 +199,24 @@ def parse_markdown_tables(markdown_text, expected_header):
                         while j < n and lines[j].strip().startswith("|"):
                             data_cells = split_table_row(lines[j])
                             if len(data_cells) == len(expected_header):
-                                rows.append(dict(zip(expected_header, data_cells)))
+                                found.append((table_no, j, data_cells))
                             j += 1
+                        table_no += 1
                         i = j
                         continue
         i += 1
-    return rows
+    return found
+
+
+def parse_markdown_tables(markdown_text, expected_header):
+    """Markdown 문서에서 expected_header와 정확히 일치하는 헤더를 가진 표를 모두 찾아
+    데이터 행을 합쳐 반환한다(문서 안에 같은 형식의 표가 여러 개 있어도 모두 수집)."""
+    found = find_table_rows(markdown_text.splitlines(), expected_header)
+    return [dict(zip(expected_header, cells)) for _, _, cells in found]
 
 
 def parse_tc_tables(markdown_text):
-    """Markdown 문서에서 TC 컬럼 정의(9개 컬럼)와 일치하는 표를 모두 찾아 데이터 행을 합쳐 반환한다."""
+    """Markdown 문서에서 TC 컬럼 정의(10개 컬럼)와 일치하는 표를 모두 찾아 데이터 행을 합쳐 반환한다."""
     return parse_markdown_tables(markdown_text, TC_COLUMNS)
 
 
@@ -215,10 +225,26 @@ def parse_candidate_ai_table(markdown_text):
     return parse_markdown_tables(markdown_text, CANDIDATE_AI_COLUMNS)
 
 
+def feature_worksheet_name(feature_slug):
+    """Feature slug를 Feature별 TC 워크시트 이름으로 변환한다. 'search' -> 'Testcase_Search',
+    'product-detail' -> 'Testcase_Product_Detail'."""
+    parts = [part for part in re.split(r"[-_\s]+", feature_slug.strip()) if part]
+    if not parts:
+        print("[오류] Feature slug가 비어 있어 워크시트 이름을 만들 수 없습니다.", file=sys.stderr)
+        sys.exit(1)
+    return "Testcase_" + "_".join(part.capitalize() for part in parts)
+
+
+def worksheet_name_from_input(input_path):
+    """docs/tc/{feature-slug}.md 경로에서 Feature별 워크시트 이름을 만든다."""
+    return feature_worksheet_name(os.path.splitext(os.path.basename(input_path))[0])
+
+
 def cmd_list(args):
     _, sh = get_client_and_sheet()
+    worksheet = args.worksheet or (feature_worksheet_name(args.feature) if args.feature else None)
     ws, worksheet_name, created = get_or_create_worksheet(
-        sh, create_if_missing=False, worksheet_name=args.worksheet
+        sh, create_if_missing=False, worksheet_name=worksheet
     )
 
     if ws is None:
@@ -281,7 +307,8 @@ def cmd_append(args):
 
     _, sh = get_client_and_sheet()
     ws, worksheet_name, created = get_or_create_worksheet(
-        sh, create_if_missing=not args.dry_run, worksheet_name=args.worksheet
+        sh, create_if_missing=not args.dry_run,
+        worksheet_name=args.worksheet or worksheet_name_from_input(args.input),
     )
 
     existing_ids = set()
@@ -299,14 +326,14 @@ def cmd_append(args):
             header = values[0]
             if header != SHEET_TC_COLUMNS:
                 print(
-                    "[오류] 기존 워크시트의 헤더가 TC 컬럼 정의('Regression 여부' 열 포함 10개)와 다릅니다. "
+                    "[오류] 기존 워크시트의 헤더가 TC 컬럼 정의('Regression 여부' 열 포함 11개)와 다릅니다. "
                     "시트를 임의로 덮어쓰지 않고 중단합니다.",
                     file=sys.stderr,
                 )
                 print(f"  기존 헤더: {header}", file=sys.stderr)
                 print(f"  기대 헤더: {SHEET_TC_COLUMNS}", file=sys.stderr)
                 print(
-                    "이전 형식(9개 컬럼)의 TC가 남아 있는 워크시트라면 사용하지 말고, "
+                    "이전 형식(Feature 컬럼 등 다른 컬럼 구성)의 TC가 남아 있는 워크시트라면 사용하지 말고, "
                     "새 워크시트 이름을 --worksheet로 지정하세요.",
                     file=sys.stderr,
                 )
@@ -350,26 +377,169 @@ def cmd_append(args):
         ws.update(range_name="A1", values=[SHEET_TC_COLUMNS])
 
     # "Regression 여부" 열은 사용자 입력 영역이므로 항상 빈 값으로 추가한다.
-    rows_to_append = [[row[col] for col in TC_COLUMNS] + [""] for row in new_rows]
+    # md 표 셀의 <br>은 시트에서 실제 줄바꿈으로 변환해 쓴다(pull은 반대로 줄바꿈을 <br>로 되돌린다).
+    rows_to_append = [[to_sheet_cell(row[col]) for col in TC_COLUMNS] + [""] for row in new_rows]
     ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+    if created or need_header_write:
+        # 새로 만든 워크시트에만 줄바꿈 표시(텍스트 줄바꿈)를 설정한다. 실패해도 반영 결과에는 영향이 없다.
+        try:
+            ws.format("D:G", {"wrapStrategy": "WRAP", "verticalAlignment": "TOP"})
+        except Exception as exc:  # noqa: BLE001 - 서식 실패는 경고만 출력
+            print(f"[경고] 줄바꿈 서식 설정에 실패했습니다(데이터 반영은 완료): {exc}", file=sys.stderr)
     print(f"\n{len(rows_to_append)}건을 워크시트 '{worksheet_name}'에 추가했습니다.")
 
 
-def cmd_risk_list(args):
-    """Feature Risk Matrix를 읽기 전용으로 조회한다(쓰기 호출 없음)."""
-    _, sh = get_client_and_sheet(sheet_id_env="GOOGLE_RISK_SHEET_ID")
-    worksheet_name = args.worksheet or os.environ.get("GOOGLE_RISK_WORKSHEET", DEFAULT_RISK_WORKSHEET_NAME)
+def to_sheet_cell(value):
+    """Markdown 표 셀 값을 시트에 쓸 문자열로 바꾼다(<br> 계열 태그를 실제 줄바꿈으로 치환)."""
+    return re.sub(r"\s*<br\s*/?>\s*", "\n", value, flags=re.IGNORECASE)
+
+
+def normalize_sheet_cell(value):
+    """시트 셀 값을 Markdown 표 셀 비교용 문자열로 바꾼다(줄바꿈은 <br>로 치환)."""
+    return re.sub(r"\s*\r?\n\s*", "<br>", value.strip())
+
+
+def format_table_row(cells):
+    """셀 리스트를 Markdown 표 한 행으로 만든다('|' 는 '\\|' 로 이스케이프)."""
+    line = "| " + " | ".join(cell.replace("|", "\\|") for cell in cells) + " |"
+    # 빈 셀은 기존 문서 표기("| |")와 맞춘다.
+    while "|  |" in line:
+        line = line.replace("|  |", "| |")
+    return line
+
+
+def tc_id_prefix(tc_id):
+    """'TC-SEARCH-005' -> 'TC-SEARCH' (Feature 구분용 접두어)."""
+    return re.sub(r"-\d+$", "", tc_id)
+
+
+def cmd_pull(args):
+    """시트의 TC를 읽어 Markdown TC 문서에 반영한다(시트→md). 시트에는 쓰지 않는다."""
+    if not os.path.isfile(args.input):
+        print(f"[오류] 입력 파일을 찾을 수 없습니다: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(args.input, "r", encoding="utf-8") as f:
+        lines = f.read().split("\n")
+
+    md_rows = find_table_rows(lines, TC_COLUMNS)
+    if not md_rows:
+        print(
+            f"[오류] {args.input} 에서 TC 컬럼 정의와 일치하는 표를 찾지 못했습니다.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    md_by_id = {}
+    for _, line_index, cells in md_rows:
+        md_by_id[cells[0]] = (line_index, cells)
+    prefixes = {tc_id_prefix(tc_id) for tc_id in md_by_id}
+
+    _, sh = get_client_and_sheet()
+    ws, worksheet_name, _ = get_or_create_worksheet(
+        sh, create_if_missing=False,
+        worksheet_name=args.worksheet or worksheet_name_from_input(args.input),
+    )
+    if ws is None:
+        print(f"[오류] 워크시트 '{worksheet_name}'가 없습니다. 먼저 append로 반영하세요.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        values = ws.get_all_values()
+    except Exception as exc:  # noqa: BLE001 - API 오류를 사용자에게 그대로 보고
+        print(f"[오류] 워크시트 '{worksheet_name}' 조회에 실패했습니다: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not values or values[0] != SHEET_TC_COLUMNS:
+        print(
+            "[오류] 워크시트 헤더가 TC 컬럼 정의('Regression 여부' 열 포함 11개)와 다릅니다.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 시트 행 수집: 같은 Feature(ID 접두어)의 행만 대상으로 한다. "Regression 여부" 열은 제외한다.
+    sheet_by_id = {}
+    ignored_other_feature = 0
+    for row in values[1:]:
+        padded = row + [""] * (len(SHEET_TC_COLUMNS) - len(row))
+        tc_id = padded[0].strip()
+        if not tc_id:
+            continue
+        if tc_id_prefix(tc_id) not in prefixes:
+            ignored_other_feature += 1
+            continue
+        if tc_id in sheet_by_id:
+            print(f"[오류] 시트에 중복된 TC ID가 있습니다: {tc_id}", file=sys.stderr)
+            sys.exit(1)
+        sheet_by_id[tc_id] = [normalize_sheet_cell(c) for c in padded[: len(TC_COLUMNS)]]
+
+    changed = []
+    for tc_id, (line_index, md_cells) in md_by_id.items():
+        if tc_id not in sheet_by_id:
+            continue
+        sheet_cells = sheet_by_id[tc_id]
+        diff_cols = [col for col, a, b in zip(TC_COLUMNS, md_cells, sheet_cells) if a != b]
+        if diff_cols:
+            changed.append((tc_id, line_index, sheet_cells, diff_cols))
+    sheet_only = [tc_id for tc_id in sheet_by_id if tc_id not in md_by_id]
+    md_only = [tc_id for tc_id in md_by_id if tc_id not in sheet_by_id]
+
+    print(f"입력 파일: {args.input}")
+    print(f"워크시트: {worksheet_name} (같은 Feature 행 {len(sheet_by_id)}건, 다른 Feature 행 {ignored_other_feature}건 제외)")
+    print(f"\n[수정됨] {len(changed)}건 (시트 값으로 md 갱신)")
+    for tc_id, _, _, diff_cols in changed:
+        print(f"- {tc_id}: {', '.join(diff_cols)}")
+    print(f"\n[시트에만 있음] {len(sheet_only)}건 (md 첫 TC 표 끝에 추가)")
+    for tc_id in sheet_only:
+        print(f"- {tc_id}")
+    print(f"\n[md에만 있음] {len(md_only)}건 (자동 삭제하지 않음, 시트에서 삭제된 것인지 확인 필요)")
+    for tc_id in md_only:
+        print(f"- {tc_id}")
+
+    if not changed and not sheet_only:
+        print("\n반영할 변경이 없습니다.")
+        return
+
+    if args.dry_run:
+        print("\n[dry-run] md 파일을 수정하지 않았습니다.")
+        return
+
+    for _, line_index, sheet_cells, _ in changed:
+        lines[line_index] = format_table_row(sheet_cells)
+
+    if sheet_only:
+        # 첫 번째 TC 표의 마지막 행 뒤에 추가한다(줄 번호 이동을 막기 위해 변경 반영 후 마지막에 삽입).
+        first_table_last = max(idx for no, idx, _ in md_rows if no == 0)
+        new_lines = [format_table_row(sheet_by_id[tc_id]) for tc_id in sheet_only]
+        lines[first_table_last + 1 : first_table_last + 1] = new_lines
+
+    try:
+        with open(args.input, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except OSError as exc:
+        print(f"[오류] md 파일 저장에 실패했습니다: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"\n{args.input} 에 시트 내용을 반영했습니다. Priority 산정 근거와 변경 이력은 별도로 갱신하세요.")
+
+
+def print_sheet_table(sh, worksheet_name, header_row):
+    """워크시트를 읽기 전용으로 조회해 Markdown 표로 출력한다(쓰기 호출 없음)."""
     try:
         ws = sh.worksheet(worksheet_name)
     except Exception:  # noqa: BLE001 - gspread.WorksheetNotFound 등
         print(f"[오류] 워크시트 '{worksheet_name}'를 찾을 수 없습니다.", file=sys.stderr)
         sys.exit(1)
 
-    values = ws.get_all_values()
-    header_index = args.header_row - 1
+    try:
+        values = ws.get_all_values()
+    except Exception as exc:  # noqa: BLE001 - API 오류를 사용자에게 그대로 보고
+        print(f"[오류] 워크시트 '{worksheet_name}' 조회에 실패했습니다: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    header_index = header_row - 1
     if header_index < 0 or len(values) <= header_index:
         print(
-            f"[오류] 워크시트 '{worksheet_name}'에 {args.header_row}행(헤더)이 없습니다.",
+            f"[오류] 워크시트 '{worksheet_name}'에 {header_row}행(헤더)이 없습니다.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -377,12 +547,39 @@ def cmd_risk_list(args):
     header = values[header_index]
     data_rows = [row for row in values[header_index + 1 :] if any(cell.strip() for cell in row)]
 
-    print(f"워크시트: {worksheet_name} (헤더 {args.header_row}행, 총 {len(data_rows)}건)")
+    print(f"워크시트: {worksheet_name} (헤더 {header_row}행, 총 {len(data_rows)}건)")
     print("| " + " | ".join(header) + " |")
     print("|" + "|".join(["---"] * len(header)) + "|")
     for row in data_rows:
         padded = row + [""] * (len(header) - len(row))
         print("| " + " | ".join(padded[: len(header)]) + " |")
+
+
+def cmd_risk_list(args):
+    """Feature Risk Matrix를 읽기 전용으로 조회한다(쓰기 호출 없음)."""
+    _, sh = get_client_and_sheet(sheet_id_env="GOOGLE_RISK_SHEET_ID")
+    worksheet_name = args.worksheet or os.environ.get("GOOGLE_RISK_WORKSHEET", DEFAULT_RISK_WORKSHEET_NAME)
+    print_sheet_table(sh, worksheet_name, args.header_row)
+
+
+def cmd_sheet_tabs(args):
+    """Risk 스프레드시트(GOOGLE_RISK_SHEET_ID)의 탭 이름 목록을 읽기 전용으로 출력한다."""
+    _, sh = get_client_and_sheet(sheet_id_env="GOOGLE_RISK_SHEET_ID")
+    try:
+        names = [ws.title for ws in sh.worksheets()]
+    except Exception as exc:  # noqa: BLE001 - API 오류를 사용자에게 그대로 보고
+        print(f"[오류] 탭 목록 조회에 실패했습니다: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"탭 {len(names)}개:")
+    for name in names:
+        print(f"- {name}")
+
+
+def cmd_sheet_read(args):
+    """Risk 스프레드시트(GOOGLE_RISK_SHEET_ID)의 임의 탭을 읽기 전용으로 조회한다."""
+    _, sh = get_client_and_sheet(sheet_id_env="GOOGLE_RISK_SHEET_ID")
+    print_sheet_table(sh, args.worksheet, args.header_row)
 
 
 def collect_regression_rows(sh, source_names):
@@ -401,7 +598,7 @@ def collect_regression_rows(sh, source_names):
         values = ws.get_all_values()
         if not values or values[0] != SHEET_TC_COLUMNS:
             print(
-                f"[오류] 원본 워크시트 '{name}'의 헤더가 TC 컬럼 정의('{REGRESSION_COLUMN}' 열 포함 10개)와 다릅니다.",
+                f"[오류] 원본 워크시트 '{name}'의 헤더가 TC 컬럼 정의('{REGRESSION_COLUMN}' 열 포함 11개)와 다릅니다.",
                 file=sys.stderr,
             )
             print(f"  기존 헤더: {values[0] if values else []}", file=sys.stderr)
@@ -695,6 +892,9 @@ def main():
     list_parser.add_argument(
         "--worksheet", default=None, help="대상 워크시트(탭) 이름 (기본값: GOOGLE_SHEET_WORKSHEET 환경변수 또는 'TC')"
     )
+    list_parser.add_argument(
+        "--feature", default=None, help="Feature slug (예: search -> 'Testcase_Search' 시트 조회). --worksheet가 우선"
+    )
     list_parser.set_defaults(func=cmd_list)
 
     append_parser = subparsers.add_parser("append", help="Markdown TC 문서를 Spreadsheet에 추가한다.")
@@ -703,7 +903,7 @@ def main():
         "--dry-run", action="store_true", help="실제로 반영하지 않고 미리보기만 출력한다."
     )
     append_parser.add_argument(
-        "--worksheet", default=None, help="대상 워크시트(탭) 이름 (기본값: GOOGLE_SHEET_WORKSHEET 환경변수 또는 'TC')"
+        "--worksheet", default=None, help="대상 워크시트(탭) 이름 (기본값: 입력 파일명 기준 Feature 시트, 예: search.md -> 'Testcase_Search')"
     )
     append_parser.set_defaults(func=cmd_append)
 
@@ -759,6 +959,34 @@ def main():
         help=f"헤더가 있는 행 번호 (기본값: {DEFAULT_RISK_HEADER_ROW})",
     )
     risk_list_parser.set_defaults(func=cmd_risk_list)
+
+    pull_parser = subparsers.add_parser(
+        "pull",
+        help="시트의 TC를 읽어 Markdown TC 문서에 반영한다(시트→md, 시트는 수정하지 않음).",
+    )
+    pull_parser.add_argument("--input", required=True, help="docs/tc/{feature-slug}.md 경로")
+    pull_parser.add_argument(
+        "--dry-run", action="store_true", help="md를 수정하지 않고 차이만 출력한다."
+    )
+    pull_parser.add_argument(
+        "--worksheet", default=None, help="대상 워크시트(탭) 이름 (기본값: 입력 파일명 기준 Feature 시트, 예: search.md -> 'Testcase_Search')"
+    )
+    pull_parser.set_defaults(func=cmd_pull)
+
+    sheet_tabs_parser = subparsers.add_parser(
+        "sheet-tabs", help="Risk 스프레드시트(GOOGLE_RISK_SHEET_ID)의 탭 이름 목록을 읽기 전용으로 조회한다."
+    )
+    sheet_tabs_parser.set_defaults(func=cmd_sheet_tabs)
+
+    sheet_read_parser = subparsers.add_parser(
+        "sheet-read",
+        help="Risk 스프레드시트(GOOGLE_RISK_SHEET_ID)의 지정한 탭을 읽기 전용으로 조회한다(QA plan 등 참고자료용).",
+    )
+    sheet_read_parser.add_argument("--worksheet", required=True, help="조회할 워크시트(탭) 이름")
+    sheet_read_parser.add_argument(
+        "--header-row", type=int, default=1, help="헤더가 있는 행 번호 (기본값: 1)"
+    )
+    sheet_read_parser.set_defaults(func=cmd_sheet_read)
 
     regression_list_parser = subparsers.add_parser(
         "regression-list",
